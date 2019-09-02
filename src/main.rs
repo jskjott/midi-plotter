@@ -1,10 +1,11 @@
 extern crate coremidi;
 extern crate serialport;
 
-use std::time::{Duration, SystemTime};
-use std::env;
 use serialport::prelude::*;
 use std::collections::HashMap;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 fn send_commands(cmds: &Vec<String>, port: &mut Box<dyn SerialPort>) {
     let cmds: Vec<Vec<u8>> = cmds.iter().map(|x| x.clone().into_bytes()).collect();
@@ -31,8 +32,14 @@ fn send_commands(cmds: &Vec<String>, port: &mut Box<dyn SerialPort>) {
     }
 }
 
-fn main() {
+struct Note {
+    y: u32,
+    x: u32,
+    width: u32,
+    height: u32,
+}
 
+fn main() {
     let start_time = SystemTime::now();
     let mut active_notes: HashMap<u8, SystemTime> = HashMap::new();
 
@@ -55,69 +62,96 @@ fn main() {
 
     let client = coremidi::Client::new("example-client").unwrap();
 
+    let (tx, rx) = mpsc::channel::<Note>();
+
+    thread::spawn(move || loop {
+        let recv = rx.try_recv();
+
+        match recv {
+            Ok(note) => {
+                let mut square: Vec<String> = vec![];
+
+                square.push("SP1;".to_string());
+                square.push(format!("PA{},{};", note.x, note.y));
+                square.push("PD;".to_string());
+                square.push(format!("PA{},{};", note.x + note.width, note.y));
+                square.push(format!(
+                    "PA{},{};",
+                    note.x + note.width,
+                    note.y + note.height
+                ));
+                square.push(format!("PA{},{};", note.x, note.y + note.height));
+                square.push(format!("PA{},{};", note.x, note.y));
+                square.push("PU;".to_string());
+
+                send_commands(&square.iter().map(|x| x.to_string()).collect(), &mut port);
+            }
+            Err(err) => {
+                if err != mpsc::TryRecvError::Empty {
+                    println!("{:?}", err)
+                }
+            }
+        };
+
+        thread::sleep(Duration::from_millis(50));
+    });
+
     let callback = move |packet_list: &coremidi::PacketList| {
         for packet in packet_list.iter() {
             if packet.data().len() == 3 {
-
                 if active_notes.contains_key(&packet.data()[1]) {
-                    
                     let time = active_notes.get(&packet.data()[1]).cloned();
                     let time = time.unwrap();
 
                     match time.elapsed() {
-                       Ok(elapsed) => {
-                           println!("{:?} {:?}", &packet.data()[1], elapsed.as_millis());
-                           let key = packet.data()[1];
-                           let time = elapsed.as_millis();
+                        Ok(elapsed) => {
+                            let key = packet.data()[1];
+                            let time = elapsed.as_millis();
 
-                           let time_since_start = match start_time.elapsed() {
-                                Ok(elapsed) => {
-                                    println!("{:?}", elapsed.as_millis());
-                                    elapsed.as_millis()
-                                }
+                            let time_since_start = match start_time.elapsed() {
+                                Ok(elapsed) => elapsed.as_millis(),
                                 Err(e) => {
-                                   println!("Error: {:?}", e);
-                                   0
-                               }
-                           };
+                                    println!("Error: {:?}", e);
+                                    0
+                                }
+                            };
 
-                           let y: u32 = 50 + 74 * key as u32;
-                           let x: u32 = (00.16 * (time_since_start as f32) + 50 as f32) as u32;
-                           let width: u32 = (00.16 * (time as f32)) as u32;
-                           let height: u32 = 74;
+                            let y: u32 = 160 + 84 * (key - 20) as u32;
+                            let x: u32 = (00.16 * (time_since_start as f32)) as u32;
+                            let width: u32 = (00.16 * (time as f32)) as u32;
+                            let height: u32 = 84;
 
-                           let mut square: Vec<String> = vec![];
+                            let note = Note {
+                                y,
+                                x,
+                                width,
+                                height,
+                            };
 
-                           square.push("SP1;".to_string());
-                           square.push(format!("PA{},{};", x, y));
-                           square.push("PD;".to_string());
-                           square.push(format!("PA{},{};", x + width, y));
-                           square.push(format!("PA{},{};", x + width, y + height));
-                           square.push(format!("PA{},{};", x, y + height));
-                           square.push(format!("PA{},{};", x, y));
-                           square.push("PU;".to_string());
-
-                           send_commands(&square.iter().map(|x| x.to_string()).collect(), &mut port);
-                       }
-                       Err(e) => {
-                           println!("Error: {:?}", e);
-                       }
-                   };
+                            tx.send(note).unwrap()
+                        }
+                        Err(e) => {
+                            println!("Error: {:?}", e);
+                        }
+                    };
 
                     active_notes.remove(&packet.data()[1]);
                 } else {
                     let timestamp = SystemTime::now();
-                    active_notes.insert(packet.data()[1], timestamp);    
+                    active_notes.insert(packet.data()[1], timestamp);
                 }
             }
-        };
+        }
     };
 
     let input_port = client.input_port("example-port", callback).unwrap();
     input_port.connect_source(&source).unwrap();
 
     let mut input_line = String::new();
-    std::io::stdin().read_line(&mut input_line).ok().expect("Failed to read line");
+    std::io::stdin()
+        .read_line(&mut input_line)
+        .ok()
+        .expect("Failed to read line");
 
     input_port.disconnect_source(&source).unwrap();
 }
