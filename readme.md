@@ -4,4 +4,4 @@ A program which plots midi notes as they are received. Currently only supports 8
 
 ![alt text](midi-plotter.gif)
 
-![alt text](blocks.JPG)
+![alt text](midi-plotter-eli-cropped.jpg)
